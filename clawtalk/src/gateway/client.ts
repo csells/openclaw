@@ -155,7 +155,7 @@ export class GatewayClient {
       minProtocol: 3,
       maxProtocol: 3,
       client: {
-        id: this.opts.clientId ?? "openclaw-webchat",
+        id: this.opts.clientId ?? "clawtalk",
         version: this.opts.clientVersion ?? "0.1.0",
         platform: "web",
         mode: "webchat",

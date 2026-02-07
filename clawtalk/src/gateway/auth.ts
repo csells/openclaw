@@ -1,4 +1,4 @@
-const STORAGE_KEY = "openclaw-webchat-auth";
+const STORAGE_KEY = "clawtalk-auth";
 
 export type StoredAuth = {
   gatewayUrl: string;

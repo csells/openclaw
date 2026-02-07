@@ -26,7 +26,7 @@ export function AuthGate() {
         className="bg-gray-900 border border-gray-800 rounded-2xl p-8 w-full max-w-md shadow-xl"
       >
         <h2 className="text-xl font-semibold text-gray-100 mb-6">
-          Connect to Gateway
+          ClawTalk
         </h2>
 
         <label className="block mb-4">

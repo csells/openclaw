@@ -11,7 +11,7 @@ export function Layout({ children }: Props) {
     <div className="flex flex-col h-screen bg-gray-950">
       <ConnectionStatus />
       <header className="border-b border-gray-800 bg-gray-900 px-6 py-3 flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-gray-100">OpenClaw Chat</h1>
+        <h1 className="text-lg font-semibold text-gray-100">ClawTalk</h1>
         <div className="flex items-center gap-2">
           <ConnectedDot />
         </div>
