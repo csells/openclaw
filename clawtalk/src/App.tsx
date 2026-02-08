@@ -3,8 +3,8 @@ import {
   useConnectionStore,
   onGatewayEvent,
 } from "./stores/connectionStore.ts";
-import { useChatStore } from "./stores/chatStore.ts";
-import { loadAuth, getDefaultGatewayUrl, getDefaultToken } from "./gateway/auth.ts";
+import { useChatStore, responseClient } from "./stores/chatStore.ts";
+import { loadAuth, getDefaultGatewayUrl, getDefaultToken, wsToHttpUrl } from "./gateway/auth.ts";
 import { Layout } from "./components/Layout.tsx";
 import { ChatView } from "./components/ChatView.tsx";
 import { Composer } from "./components/Composer.tsx";
@@ -22,6 +22,8 @@ export function App() {
     const token = saved?.token ?? getDefaultToken();
 
     if (url) {
+      // Configure the HTTP ResponseClient from the same URL/token
+      responseClient.updateConfig(wsToHttpUrl(url), token);
       connect(url, token);
     }
   }, [connect]);
@@ -34,7 +36,7 @@ export function App() {
       handleChatEvent(payload as ChatEvent);
     });
 
-    // Load history when connected
+    // Load history and configure ResponseClient when connected
     let prevStatus = useConnectionStore.getState().status;
     const unsubConnection = useConnectionStore.subscribe((state) => {
       if (state.status === "connected" && prevStatus !== "connected") {

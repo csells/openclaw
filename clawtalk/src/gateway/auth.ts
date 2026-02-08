@@ -36,3 +36,12 @@ export function getDefaultGatewayUrl(): string {
 export function getDefaultToken(): string | undefined {
   return (import.meta.env.VITE_GATEWAY_TOKEN as string | undefined) || undefined;
 }
+
+/**
+ * Derive the HTTP base URL from a WebSocket URL.
+ * ws://host:port  → http://host:port
+ * wss://host:port → https://host:port
+ */
+export function wsToHttpUrl(wsUrl: string): string {
+  return wsUrl.replace(/^ws(s?):\/\//, "http$1://");
+}

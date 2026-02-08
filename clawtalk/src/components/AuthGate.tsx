@@ -1,6 +1,7 @@
 import { useCallback, useRef, type FormEvent } from "react";
-import { getDefaultGatewayUrl, saveAuth } from "../gateway/auth.ts";
+import { getDefaultGatewayUrl, saveAuth, wsToHttpUrl } from "../gateway/auth.ts";
 import { useConnectionStore } from "../stores/connectionStore.ts";
+import { responseClient } from "../stores/chatStore.ts";
 
 export function AuthGate() {
   const connect = useConnectionStore((s) => s.connect);
@@ -14,6 +15,7 @@ export function AuthGate() {
       const token = tokenRef.current?.value?.trim() || undefined;
 
       saveAuth({ gatewayUrl: url, token });
+      responseClient.updateConfig(wsToHttpUrl(url), token);
       connect(url, token);
     },
     [connect]

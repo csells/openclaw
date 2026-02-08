@@ -4,11 +4,11 @@ import { useChatStore } from "../stores/chatStore.ts";
 export function Composer() {
   const sendMessage = useChatStore((s) => s.sendMessage);
   const abort = useChatStore((s) => s.abort);
-  const streamingRunId = useChatStore((s) => s.streamingRunId);
+  const streamingText = useChatStore((s) => s.streamingText);
   const sending = useChatStore((s) => s.sending);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const isStreaming = streamingRunId !== null;
+  const isStreaming = streamingText !== null;
 
   const handleSubmit = useCallback(
     (e?: FormEvent) => {

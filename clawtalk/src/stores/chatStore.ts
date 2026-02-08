@@ -4,21 +4,25 @@ import type {
   ChatHistoryResult,
   Message,
 } from "../gateway/types.ts";
+import { ResponseClient, type InputContentPart } from "../gateway/responses.ts";
 import { useConnectionStore } from "./connectionStore.ts";
+
+// Singleton ResponseClient — configured when the connection is established
+export const responseClient = new ResponseClient("", undefined);
 
 type ChatState = {
   sessionKey: string;
   messages: Message[];
   streamingText: string | null;
-  streamingRunId: string | null;
   error: string | null;
   loading: boolean;
   sending: boolean;
+  abortController: AbortController | null;
 
   // Actions
   setSessionKey: (key: string) => void;
   loadHistory: () => Promise<void>;
-  sendMessage: (text: string) => Promise<void>;
+  sendMessage: (text: string, attachments?: File[]) => Promise<void>;
   abort: () => Promise<void>;
   handleChatEvent: (payload: ChatEvent) => void;
   clearError: () => void;
@@ -28,13 +32,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionKey: "main",
   messages: [],
   streamingText: null,
-  streamingRunId: null,
   error: null,
   loading: false,
   sending: false,
+  abortController: null,
 
   setSessionKey: (key: string) => {
-    set({ sessionKey: key, messages: [], streamingText: null, streamingRunId: null, error: null });
+    set({ sessionKey: key, messages: [], streamingText: null, error: null, abortController: null });
   },
 
   loadHistory: async () => {
@@ -56,15 +60,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (text: string) => {
+  sendMessage: async (text: string, attachments?: File[]) => {
     const trimmed = text.trim();
-    if (!trimmed) return;
-
-    const client = useConnectionStore.getState().client;
-    if (!client?.connected) return;
+    const hasAttachments = attachments && attachments.length > 0;
+    if (!trimmed && !hasAttachments) return;
 
     const { sessionKey } = get();
-    const idempotencyKey = crypto.randomUUID();
+    const abortController = new AbortController();
 
     // Optimistically add user message
     const userMessage: Message = {
@@ -78,86 +80,81 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sending: true,
       error: null,
       streamingText: "",
-      streamingRunId: idempotencyKey,
+      abortController,
     }));
 
-    try {
-      await client.request("chat.send", {
-        sessionKey,
-        message: trimmed,
-        deliver: false,
-        idempotencyKey,
-      });
-    } catch (err) {
-      set({
-        sending: false,
-        streamingText: null,
-        streamingRunId: null,
-        error: String(err),
-      });
-    } finally {
-      set({ sending: false });
+    // Build OpenResponses input with attachments
+    const contentParts: InputContentPart[] = [];
+    if (trimmed) {
+      contentParts.push({ type: "input_text", text: trimmed });
     }
+
+    if (hasAttachments) {
+      for (const file of attachments) {
+        const part = await fileToInputPart(file);
+        if (part) contentParts.push(part);
+      }
+    }
+
+    const input = contentParts.length === 1 && contentParts[0].type === "input_text"
+      ? trimmed // Simple string for text-only sends
+      : [{ role: "user" as const, content: contentParts }];
+
+    await responseClient.send({
+      input,
+      sessionKey,
+      signal: abortController.signal,
+      onDelta: (accumulated) => {
+        set({ streamingText: accumulated });
+      },
+      onComplete: () => {
+        set({ streamingText: null, sending: false, abortController: null });
+        get().loadHistory();
+      },
+      onError: (error) => {
+        set({
+          streamingText: null,
+          sending: false,
+          abortController: null,
+          error,
+        });
+      },
+    });
   },
 
   abort: async () => {
-    const client = useConnectionStore.getState().client;
-    if (!client?.connected) return;
-
-    const { sessionKey, streamingRunId } = get();
-    try {
-      await client.request("chat.abort", {
-        sessionKey,
-        ...(streamingRunId ? { runId: streamingRunId } : {}),
-      });
-    } catch (err) {
-      set({ error: String(err) });
+    // Abort the HTTP SSE stream
+    const { abortController, sessionKey } = get();
+    if (abortController) {
+      abortController.abort();
+      set({ streamingText: null, sending: false, abortController: null });
     }
+
+    // Also send abort via WebSocket for server-side cleanup
+    const client = useConnectionStore.getState().client;
+    if (client?.connected) {
+      try {
+        await client.request("chat.abort", { sessionKey });
+      } catch {
+        // Best-effort
+      }
+    }
+
+    get().loadHistory();
   },
 
   handleChatEvent: (payload: ChatEvent) => {
-    const { sessionKey, streamingRunId } = get();
+    const { sessionKey } = get();
 
     // Ignore events for other sessions
     if (payload.sessionKey !== sessionKey) return;
 
-    // Handle final events from other runs (e.g. sub-agent) by refreshing history
-    if (payload.runId && streamingRunId && payload.runId !== streamingRunId) {
-      if (payload.state === "final") {
-        get().loadHistory();
-      }
-      return;
+    // Handle final/aborted events from server (e.g. sub-agent, server-side abort)
+    if (payload.state === "final" || payload.state === "aborted") {
+      get().loadHistory();
     }
-
-    switch (payload.state) {
-      case "delta": {
-        // Server sends full accumulated text, not incremental
-        const text = extractText(payload.message);
-        if (typeof text === "string") {
-          const current = get().streamingText ?? "";
-          // Only update if new text is longer (monotonic)
-          if (!current || text.length >= current.length) {
-            set({ streamingText: text });
-          }
-        }
-        break;
-      }
-      case "final":
-        set({ streamingText: null, streamingRunId: null });
-        // Reload history to get the persisted version
-        get().loadHistory();
-        break;
-      case "aborted":
-        set({ streamingText: null, streamingRunId: null });
-        get().loadHistory();
-        break;
-      case "error":
-        set({
-          streamingText: null,
-          streamingRunId: null,
-          error: payload.errorMessage ?? "Chat error",
-        });
-        break;
+    if (payload.state === "error") {
+      set({ error: payload.errorMessage ?? "Chat error" });
     }
   },
 
@@ -166,13 +163,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
 // ── Helpers ──
 
-function extractText(message?: Message): string | null {
-  if (!message?.content) return null;
-  const parts: string[] = [];
-  for (const block of message.content) {
-    if (block.type === "text" && block.text) {
-      parts.push(block.text);
-    }
+async function fileToInputPart(file: File): Promise<InputContentPart | null> {
+  const buffer = await file.arrayBuffer();
+  const base64 = btoa(
+    new Uint8Array(buffer).reduce((s, b) => s + String.fromCharCode(b), "")
+  );
+  const mime = file.type;
+
+  // Images → input_image
+  if (mime.startsWith("image/")) {
+    return {
+      type: "input_image",
+      source: { type: "base64", media_type: mime, data: base64 },
+    };
   }
-  return parts.length > 0 ? parts.join("\n") : null;
+
+  // Documents → input_file (PDFs, text, markdown, HTML, CSV, JSON)
+  const allowedMimes = [
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "text/html",
+    "text/csv",
+    "application/json",
+  ];
+  if (allowedMimes.includes(mime)) {
+    return {
+      type: "input_file",
+      source: { type: "base64", media_type: mime, data: base64 },
+      filename: file.name,
+    };
+  }
+
+  // Unsupported type
+  return null;
 }

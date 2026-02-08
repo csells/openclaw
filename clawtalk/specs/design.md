@@ -1,6 +1,6 @@
-# OpenClaw Web Chat Client — Design Document
+# ClawTalk — Design Document
 
-> A modern, full-featured AI chat web client built on the OpenClaw Gateway WebSocket protocol.
+> A modern, full-featured AI chat web client built on the OpenClaw Gateway.
 
 ## Overview
 
@@ -11,6 +11,26 @@ full feature set: multi-chat, model switching, multimedia, tool events, responsi
 
 Each milestone produces a working, deployable artifact. Later milestones never block earlier
 ones.
+
+### Dual-Protocol Architecture
+
+ClawTalk uses **two** OpenClaw protocols, each for what it does best:
+
+| Protocol | Role | Used For |
+|----------|------|----------|
+| **WebSocket** (Gateway Protocol v3) | Control plane | Connection lifecycle, session CRUD, model/agent listing, tool events, abort |
+| **OpenResponses HTTP** (`POST /v1/responses` + SSE) | Data plane | Every chat send, streaming responses, file/image attachments |
+
+**Why both?** The WebSocket protocol only supports image attachments (PDFs and documents
+are silently dropped by the server). The OpenResponses HTTP API supports full media input
+(PDFs, text files, markdown, HTML, CSV, JSON, images) with SSE streaming. By routing all
+sends through the HTTP API, agents get full media fidelity. The WebSocket remains essential
+for session management, model discovery, tool events, and real-time features that the HTTP
+API doesn't offer.
+
+**Session bridging**: The HTTP API's `x-openclaw-session-key` header targets the same
+session key the WebSocket is viewing. After an HTTP SSE stream completes, the WebSocket
+reloads history via `chat.history` to pick up the persisted result.
 
 ---
 
@@ -41,35 +61,46 @@ client because:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    React Application                     │
-│                                                         │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │  UI Layer   │  │  State Layer │  │ Protocol Layer│  │
-│  │             │  │   (Zustand)  │  │  (WebSocket)  │  │
-│  │ ChatView    │◄─┤              │◄─┤               │  │
-│  │ Sidebar     │  │ chatStore    │  │ GatewayClient │  │
-│  │ Composer    │  │ sessionStore │  │               │  │
-│  │ Header      │  │ uiStore     │  │ Handles:      │  │
-│  │ ModelPicker │──┤              │──┤ - connect     │  │
-│  │ ToolPanel   │  │              │  │ - framing     │  │
-│  │             │  │              │  │ - reconnect   │  │
-│  └─────────────┘  └──────────────┘  │ - auth        │  │
-│                                     └───────────────┘  │
-└─────────────────────────────────────────────────────────┘
-                          │
-                     WebSocket (JSON)
-                          │
-                ┌─────────┴─────────┐
-                │  OpenClaw Gateway  │
-                └───────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      React Application                        │
+│                                                              │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐  │
+│  │  UI Layer   │  │  State Layer │  │  Protocol Layer    │  │
+│  │             │  │   (Zustand)  │  │                    │  │
+│  │ ChatView    │◄─┤              │◄─┤ GatewayClient (WS) │  │
+│  │ Sidebar     │  │ chatStore    │  │  - connect/auth    │  │
+│  │ Composer    │  │ sessionStore │  │  - sessions CRUD   │  │
+│  │ Header      │  │ modelStore   │  │  - models/agents   │  │
+│  │ ModelPicker │──┤              │──┤  - tool events     │  │
+│  │ ToolPanel   │  │              │  │  - abort           │  │
+│  │             │  │              │  │                    │  │
+│  └─────────────┘  └──────────────┘  │ ResponseClient     │  │
+│                                     │  (HTTP + SSE)      │  │
+│                                     │  - chat sends      │  │
+│                                     │  - file attachments│  │
+│                                     │  - SSE streaming   │  │
+│                                     └────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
+                     │                        │
+              WebSocket (JSON)         HTTP + SSE
+              (control plane)         (data plane)
+                     │                        │
+                     └──────────┬─────────────┘
+                       ┌────────┴────────┐
+                       │ OpenClaw Gateway │
+                       │   (same port)   │
+                       └─────────────────┘
 ```
 
 ### Three-Layer Separation
 
-1. **Protocol Layer** (`src/gateway/`) — Pure WebSocket client. No React, no DOM. Handles
-   connect, auth, framing, request/response correlation, event dispatch, reconnection,
-   sequence tracking. This layer is framework-agnostic and testable in isolation.
+1. **Protocol Layer** (`src/gateway/`) — Two clients, framework-agnostic and testable in isolation:
+   - **GatewayClient** (WebSocket): connection lifecycle, auth, framing, request/response
+     correlation, event dispatch, reconnection, sequence tracking. Used for session
+     management, model discovery, tool events, and abort.
+   - **ResponseClient** (HTTP + SSE): sends chat messages via `POST /v1/responses` with
+     SSE streaming. Handles file attachments (PDFs, images, documents). Bridges to the
+     WebSocket session via the `x-openclaw-session-key` header.
 
 2. **State Layer** (`src/stores/`) — Zustand stores that translate protocol events into
    UI-ready state. Each store owns one concern (chat, sessions, models, connection). Stores
@@ -87,7 +118,7 @@ client because:
 **Goal**: Vite project boots, connects to gateway, prints hello-ok to console.
 
 ```
-webchat/
+clawtalk/
 ├── index.html
 ├── package.json
 ├── tsconfig.json
@@ -96,9 +127,10 @@ webchat/
 │   ├── main.tsx                  # React root mount
 │   ├── App.tsx                   # Top-level layout shell
 │   ├── gateway/
-│   │   ├── client.ts             # GatewayClient class
+│   │   ├── client.ts             # GatewayClient class (WebSocket control plane)
+│   │   ├── responses.ts          # ResponseClient class (HTTP + SSE data plane)
 │   │   ├── types.ts              # Protocol frame types
-│   │   └── auth.ts               # Token auth helper
+│   │   └── auth.ts               # Token auth + URL helpers
 │   └── components/
 │       └── ConnectionStatus.tsx  # Shows connected/disconnected
 ```
@@ -216,27 +248,32 @@ type ChatState = {
 };
 ```
 
-**Data flow for sending a message**:
+**Data flow for sending a message** (via OpenResponses HTTP + SSE):
 
 ```
 User types → Composer.onSubmit
-  → chatStore.sendMessage(text)
+  → chatStore.sendMessage(text, attachments?)
     → Optimistically add user message to messages[]
-    → Set streamingRunId = uuid, streamingText = ""
-    → gateway.request("chat.send", { sessionKey, message, idempotencyKey })
-    → Ack received (runId confirmed)
+    → Set streamingText = ""
+    → responseClient.send({
+        model: "openclaw",
+        input: text (+ file attachments as input_file/input_image),
+        sessionKey,     // via x-openclaw-session-key header
+        stream: true,
+      })
+    → SSE events arrive:
+        response.output_text.delta → streamingText = accumulated (append deltas)
+        response.completed → streamingText = null, loadHistory() via WebSocket
+        response.failed → error = message
 
-Gateway streams → gateway.onEvent("chat", payload)
-  → chatStore.handleChatEvent(payload)
-    → if payload.state === "delta":
-        streamingText = payload.message.content[0].text  (full replace)
-    → if payload.state === "final":
-        streamingText = null, streamingRunId = null
-        loadHistory()  (get persisted version)
-    → if payload.state === "error":
-        streamingText = null, streamingRunId = null
-        error = payload.errorMessage
+Abort:
+  → gateway.request("chat.abort", { sessionKey })  // via WebSocket
 ```
+
+**Why OpenResponses for sends?** The WebSocket `chat.send` silently drops non-image
+attachments. The HTTP API supports full media input (PDFs, text files, images) with SSE
+streaming, giving agents full media fidelity. Session bridging via `x-openclaw-session-key`
+header ensures responses land in the correct WebSocket session.
 
 **Message rendering rules**:
 - User messages: right-aligned, colored background
@@ -736,9 +773,10 @@ webchat/
 │   ├── App.tsx
 │   │
 │   ├── gateway/                    # Protocol Layer
-│   │   ├── client.ts               #   WebSocket client
+│   │   ├── client.ts               #   GatewayClient (WebSocket control plane)
+│   │   ├── responses.ts            #   ResponseClient (HTTP + SSE data plane)
 │   │   ├── types.ts                #   Frame + protocol types
-│   │   ├── auth.ts                 #   Token/password auth
+│   │   ├── auth.ts                 #   Token/password auth + URL helpers
 │   │   ├── device-identity.ts      #   Ed25519 keypair
 │   │   ├── device-auth.ts          #   Challenge signing
 │   │   └── device-tokens.ts        #   Device token persistence
@@ -882,27 +920,27 @@ sessionStore.switchSession(key)
 
 ## Protocol Method Usage Map
 
-| Feature | Protocol Methods | Events |
-|---------|-----------------|--------|
-| Connect | `connect` | `connect.challenge`, `tick`, `shutdown` |
-| Send message | `chat.send` | `chat` (delta, final, aborted, error) |
-| Load history | `chat.history` | — |
-| Abort | `chat.abort` | `chat` (aborted) |
-| Inject note | `chat.inject` | `chat` (final) |
-| List sessions | `sessions.list` | — |
-| Switch session | `chat.history` | — |
-| New chat | `sessions.reset` | — |
-| Rename chat | `sessions.patch` (label) | — |
-| Delete chat | `sessions.delete` | — |
-| List models | `models.list` | — |
-| Switch model | `sessions.patch` (model) | — |
-| Set thinking | `sessions.patch` (thinkingLevel) | — |
-| List agents | `agents.list` | — |
-| Tool events | — | `agent` (stream: "tool") |
-| Set verbose | `sessions.patch` (verboseLevel) | — |
-| Image attach | `chat.send` (attachments) | — |
-| Connection health | — | `tick` |
-| Server restart | — | `shutdown` |
+| Feature | Protocol | Method / Endpoint | Events |
+|---------|----------|------------------|--------|
+| Connect | WebSocket | `connect` | `connect.challenge`, `tick`, `shutdown` |
+| **Send message** | **HTTP** | **`POST /v1/responses`** (SSE) | `response.output_text.delta`, `response.completed` |
+| **File attachments** | **HTTP** | **`POST /v1/responses`** (`input_file`, `input_image`) | — |
+| Load history | WebSocket | `chat.history` | — |
+| Abort | WebSocket | `chat.abort` | `chat` (aborted) |
+| Inject note | WebSocket | `chat.inject` | `chat` (final) |
+| List sessions | WebSocket | `sessions.list` | — |
+| Switch session | WebSocket | `chat.history` | — |
+| New chat | WebSocket | `sessions.reset` | — |
+| Rename chat | WebSocket | `sessions.patch` (label) | — |
+| Delete chat | WebSocket | `sessions.delete` | — |
+| List models | WebSocket | `models.list` | — |
+| Switch model | WebSocket | `sessions.patch` (model) | — |
+| Set thinking | WebSocket | `sessions.patch` (thinkingLevel) | — |
+| List agents | WebSocket | `agents.list` | — |
+| Tool events | WebSocket | — | `agent` (stream: "tool") |
+| Set verbose | WebSocket | `sessions.patch` (verboseLevel) | — |
+| Connection health | WebSocket | — | `tick` |
+| Server restart | WebSocket | — | `shutdown` |
 
 ---
 
@@ -914,7 +952,7 @@ These are explicitly not in scope for the initial client:
 - **Canvas/A2UI**: The gateway supports embedded canvases; we don't render them
 - **Node hosting**: No exec, screen, camera, location capabilities
 - **Plugin SDK**: No plugin loading; this is a pure chat client
-- **OpenAI/OpenResponses HTTP API**: We use WebSocket exclusively
+- **OpenAI Chat Completions API**: We use OpenResponses, not the `/v1/chat/completions` endpoint
 - **Multi-gateway**: One gateway connection at a time
 - **Offline mode**: No local message caching or service worker
 - **User management**: Single-user client, no login system
